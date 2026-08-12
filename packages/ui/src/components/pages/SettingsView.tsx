@@ -9,7 +9,14 @@
  */
 import { isViewVisible } from "@elizaos/core";
 import { isPermissionId, type PermissionId } from "@elizaos/shared";
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useAgentElement } from "../../agent-surface";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { ContentLayout } from "../../layouts/content-layout";
@@ -25,6 +32,7 @@ import {
   backFromConnectorDetail,
   type GroupedSettingsSections,
   getAllSettingsSections,
+  getSettingsSectionRegistryVersion,
   groupSettingsSections,
   parseSettingsHash,
   readSettingsHashRoute,
@@ -35,6 +43,7 @@ import {
   type SettingsSectionDef,
   settingsSectionLabel,
   settingsSectionTitle,
+  subscribeSettingsSections,
 } from "../settings/settings-sections";
 import { navigateBackToLauncher, ViewHeader } from "../shared/ViewHeader";
 import { Button } from "../ui/button";
@@ -233,6 +242,11 @@ export function SettingsView({
   const plugins = useAppSelector((s) => s.plugins);
   const enabledKinds = useEnabledViewKinds();
   const isDesktop = useMediaQuery("(min-width: 1024px)");
+  const settingsRegistryVersion = useSyncExternalStore(
+    subscribeSettingsSections,
+    getSettingsSectionRegistryVersion,
+    getSettingsSectionRegistryVersion,
+  );
   const [activeSection, setActiveSection] = useState<string | null>(
     () => initialSection ?? readSettingsHashSection(),
   );
@@ -244,13 +258,16 @@ export function SettingsView({
   );
 
   const visibleSections = useMemo(() => {
+    // The version is an invalidation input; the registry read below returns
+    // the actual section definitions after a host/plugin mutation.
+    void settingsRegistryVersion;
     return getAllSettingsSections().filter((section) => {
       if (section.id === "wallet-rpc" && walletEnabled === false) return false;
       if (!isViewVisible(section, enabledKinds)) return false;
       if (section.hideOnCloud && isAndroidCloudBuild()) return false;
       return true;
     });
-  }, [walletEnabled, enabledKinds]);
+  }, [walletEnabled, enabledKinds, settingsRegistryVersion]);
   const visibleSectionIds = useMemo(
     () => new Set(visibleSections.map((section) => section.id)),
     [visibleSections],
@@ -366,6 +383,19 @@ export function SettingsView({
       window.removeEventListener("popstate", handleLocationChange);
     };
   }, [visibleSectionIds]);
+
+  // Hosts may register sections after Settings mounts (for example, the web
+  // shell dynamically imports private Cloud surfaces). Reconcile a retained
+  // deep-link as soon as its section becomes available; an unknown hash stays
+  // on the hub until some owner actually registers that id.
+  useEffect(() => {
+    void settingsRegistryVersion;
+    if (typeof window === "undefined") return;
+    const nextSection = readSettingsHashSection();
+    if (!nextSection) return;
+    setSettingsRoute(readSettingsHashRoute());
+    setActiveSection(nextSection);
+  }, [settingsRegistryVersion]);
 
   // Explicit navigation (hash / initialSection / agent anchor) resolves
   // against the full registry, not just the visible hub rows: hidden sections

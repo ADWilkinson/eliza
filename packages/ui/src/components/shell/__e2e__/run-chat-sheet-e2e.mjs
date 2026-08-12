@@ -1437,6 +1437,12 @@ async function openSheetToFull(p, pointer) {
   await gesture(p, 160, { pointer, slow: false, steps: 1 });
   await p.waitForTimeout(SETTLE);
   if ((await detent(p)) !== "full") {
+    // The detent attribute commits before its spring reaches HALF. Starting the
+    // second real gesture during that spring can lose the flick on a loaded CI
+    // renderer, leaving the setup at HALF even though the gesture path itself
+    // is healthy. Use rendered geometry as the boundary between the two pulls.
+    const halfH = Math.round((await viewportH(p)) * 0.46);
+    await waitForSheetHeightNear(p, halfH, 36);
     await gesture(p, 220, { pointer, slow: false, steps: 1 });
     await p.waitForTimeout(SETTLE);
   }
