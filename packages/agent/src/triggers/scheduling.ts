@@ -48,6 +48,7 @@ interface DraftInput {
   wakeMode?: TriggerWakeMode;
   enabled?: boolean;
   createdBy?: string;
+  notifyOnOutcome?: boolean;
   timezone?: string;
   intervalMs?: number;
   scheduledAtIso?: string;
@@ -132,6 +133,7 @@ export function buildTriggerConfig(params: {
     enabled: params.draft.enabled,
     wakeMode: params.draft.wakeMode,
     createdBy: params.draft.createdBy,
+    notifyOnOutcome: params.draft.notifyOnOutcome === true,
     timezone: params.draft.timezone,
     intervalMs:
       params.draft.triggerType === "interval"
@@ -195,6 +197,7 @@ export function normalizeTriggerDraft(params: {
     wakeMode: TriggerWakeMode;
     enabled: boolean;
     createdBy: string;
+    notifyOnOutcome?: boolean;
   };
 }): { draft?: NormalizedTriggerDraft; error?: string } {
   const kind: TriggerKind = params.input.kind ?? "workflow";
@@ -230,6 +233,8 @@ export function normalizeTriggerDraft(params: {
   const wakeMode = params.input.wakeMode ?? params.fallback.wakeMode;
   const enabled = params.input.enabled ?? params.fallback.enabled;
   const createdBy = params.input.createdBy ?? params.fallback.createdBy;
+  const notifyOnOutcome =
+    params.input.notifyOnOutcome ?? params.fallback.notifyOnOutcome ?? false;
   const timezone = params.input.timezone;
   const intervalMsRaw =
     typeof params.input.intervalMs === "number"
@@ -264,6 +269,7 @@ export function normalizeTriggerDraft(params: {
         wakeMode,
         enabled,
         createdBy,
+        notifyOnOutcome,
         timezone,
         intervalMs,
         maxRuns,
@@ -286,6 +292,7 @@ export function normalizeTriggerDraft(params: {
         wakeMode,
         enabled,
         createdBy,
+        notifyOnOutcome,
         timezone,
         scheduledAtIso,
         maxRuns,
@@ -308,6 +315,7 @@ export function normalizeTriggerDraft(params: {
         wakeMode,
         enabled,
         createdBy,
+        notifyOnOutcome,
         timezone,
         eventKind,
         maxRuns,
@@ -330,6 +338,7 @@ export function normalizeTriggerDraft(params: {
       wakeMode,
       enabled,
       createdBy,
+      notifyOnOutcome,
       timezone,
       cronExpression,
       maxRuns,
