@@ -166,9 +166,9 @@ export const DEFAULT_CONTEXT_DEFINITIONS: readonly ContextDefinition[] =
 			id: "calendar",
 			label: "Calendar",
 			description:
-				"Availability, events, meetings, appointments, invites, travel time, scheduling constraints, reschedules, and calendar-derived reminders. A timed request such as 'add demo tomorrow at 9am' is a calendar event unless the user explicitly asks for a task or reminder.",
+				"Availability, events, meetings, appointments, invites, travel time, scheduling constraints, reschedules, and calendar-derived reminders. A timed request to ADD an appointment/meeting such as 'add demo tomorrow at 9am' is a calendar event. But any 'remind me …' request is a REMINDER, not a calendar event — 'remind me at 9pm to X' exactly as much as 'remind me in 10 minutes': route it to TRIGGER_CREATE. A calendar event only notifies ~30 minutes before the event and may never reach the user's chat, whereas a reminder fires at the exact stated time in the channel, so a 'remind me at TIME' answered with a calendar event is wrong.",
 			descriptionCompressed:
-				"Read/write calendar events and schedules; timed add-X requests are events unless explicitly tasks/reminders",
+				"Read/write calendar events; 'add <appointment> at TIME' is an event, but any 'remind me at/in TIME' is a reminder -> TRIGGER_CREATE (events only notify ~30m early), never a calendar event",
 			sensitivity: "private",
 			cacheScope: "turn",
 			roleGate: { minRole: "ADMIN" },

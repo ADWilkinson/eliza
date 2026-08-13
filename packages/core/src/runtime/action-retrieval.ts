@@ -320,8 +320,25 @@ export function retrieveActions(
 	input: RetrieveActionsInput,
 ): ActionRetrievalResponse {
 	const candidateActions = dedupeNormalizedStrings(input.candidateActions);
+	const catalogParentNames = new Set(
+		input.catalog.parents.map((parent) => parent.normalizedName),
+	);
 	const parentActionHints = dedupeNormalizedStrings([
 		...(input.parentActionHints ?? []),
+		// A candidate that IS a canonical catalog parent name (Stage-1 emits
+		// e.g. candidateActions=["OWNER_REMINDERS"]) is the most explicit
+		// routing signal retrieval receives, yet it previously reached no
+		// exact-hint path: the alias branch below returns [] whenever
+		// candidateNamespaceParentExists matches, and resolveSimileParentHints
+		// deliberately excludes real parent names. Such a candidate then
+		// competed on the fuzzy stages only (regex caps at 0.95), where a
+		// lexically greedy parent — CALENDAR on time-bearing phrasing like
+		// "remind me in 2 minutes" — out-scored it and held rank 1. Exact-score
+		// it exactly like an explicit parentActionHint so Stage-1's explicit
+		// parent choice is honored.
+		...candidateActions.filter((actionName) =>
+			catalogParentNames.has(normalizeActionName(actionName)),
+		),
 		...candidateActions.flatMap((actionName) =>
 			candidateNamespaceParentExists(input.catalog.parents, actionName)
 				? []

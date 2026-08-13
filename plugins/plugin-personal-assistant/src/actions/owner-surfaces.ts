@@ -267,9 +267,9 @@ export const ownerRemindersAction: Action = {
       "RECURRING_REMINDER",
     ],
     description:
-      'Owner reminders: create/update/delete/complete/skip/snooze/review one-off, date-only, deadline ("by the 20th"), and recurring reminders.',
+      'Owner reminders: create/update/delete/complete/skip/snooze/review one-off, date-only, deadline ("by the 20th"), and recurring reminders. Use for ANY "remind me in N minutes/hours" or "remind me at TIME to do X" request — a saved reminder fires a real notification ping when due. Never satisfy a "remind me" ask with a CALENDAR event: calendar events do not notify.',
     descriptionCompressed:
-      "owner reminders/deadlines: action=create|update|delete|complete|skip|snooze|review",
+      "owner reminders/deadlines ('remind me in N min / at TIME' — fires a real ping; CALENDAR events do not notify): action=create|update|delete|complete|skip|snooze|review",
     defaultKind: "definition",
   }),
   name: "OWNER_REMINDERS",
@@ -288,9 +288,9 @@ export const ownerRemindersAction: Action = {
     "RECURRING_REMINDER",
   ],
   description:
-    'Owner reminders: create/update/delete/complete/skip/snooze/review one-off, date-only, deadline ("by the 20th"), and recurring reminders.',
+    'Owner reminders: create/update/delete/complete/skip/snooze/review one-off, date-only, deadline ("by the 20th"), and recurring reminders. Use for ANY "remind me in N minutes/hours" or "remind me at TIME to do X" request — a saved reminder fires a real notification ping when due. Never satisfy a "remind me" ask with a CALENDAR event: calendar events do not notify.',
   descriptionCompressed:
-    "owner reminders/deadlines: action=create|update|delete|complete|skip|snooze|review",
+    "owner reminders/deadlines ('remind me in N min / at TIME' — fires a real ping; CALENDAR events do not notify): action=create|update|delete|complete|skip|snooze|review",
 };
 
 export const ownerAlarmsAction: Action = {
