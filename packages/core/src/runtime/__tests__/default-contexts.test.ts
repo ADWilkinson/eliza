@@ -103,4 +103,17 @@ describe("default-contexts", () => {
 		expect(guestContexts).not.toContain("memory");
 		expect(guestContexts).not.toContain("documents");
 	});
+
+	it("distinguishes exact-time reminders from calendar appointments", () => {
+		const calendar = DEFAULT_CONTEXT_DEFINITIONS.find(
+			(definition) => definition.id === "calendar",
+		);
+
+		expect(calendar?.description).toContain("any 'remind me …' request");
+		expect(calendar?.description).toContain("route it to TRIGGER_CREATE");
+		expect(calendar?.description).toContain("'add demo tomorrow at 9am'");
+		expect(calendar?.descriptionCompressed).toContain(
+			"'remind me at/in TIME' is a reminder",
+		);
+	});
 });

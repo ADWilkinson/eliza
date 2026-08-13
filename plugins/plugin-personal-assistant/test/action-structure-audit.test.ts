@@ -200,6 +200,9 @@ describe("brush-teeth habit-save routing contract (#9950/#10722)", () => {
     const reminders = findAction("OWNER_REMINDERS");
     expect(reminders?.description).toContain("deadline");
     expect(reminders?.description).toContain("by the 20th");
+    expect(reminders?.description).toContain("remind me at TIME");
+    expect(reminders?.description).toContain("Never satisfy");
+    expect(reminders?.description).toContain("CALENDAR event");
     expect(reminders?.descriptionCompressed).toContain("deadlines");
 
     const scheduledTasks = findAction("SCHEDULED_TASKS");
