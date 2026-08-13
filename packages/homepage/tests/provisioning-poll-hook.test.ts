@@ -9,10 +9,12 @@
  * - cleanup (ready-state transition and unmount) stops further polling
  *
  * Uses jsdom (already a root devDependency) to provide the DOM React needs,
- * and a controllable setInterval shim so tests advance the 5 s interval
- * deterministically without real-time waits.
+ * and a controllable timer shim so tests advance the 5 s poll deterministically
+ * while React-settling waits stay on the captured host timer.
  */
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // Capture every fetch invocation so tests can assert on the request body.
 const fetchCalls: Array<{ url: string; body: unknown }> = [];
@@ -21,14 +23,16 @@ const fetchCalls: Array<{ url: string; body: unknown }> = [];
 // running until the test deliberately flips the status to "running".
 let nextStatus = "pending";
 
-// --- Controllable interval scheduler ---
-// Production calls setInterval(cb, 5000). We capture the callback so tests
-// can fire it on demand, proving the interval retry (not just the immediate
-// call) carries the correct body. We also track which timers were cleared.
+// --- Controllable poll scheduler ---
+// Production recursively schedules setTimeout(callback, 5000). We capture the
+// callback so tests can fire it on demand, proving the scheduled retry (not
+// just the immediate call) carries the correct body. We also track which
+// timers were cleared.
 interface CapturedTimer {
   callback: () => void;
   cleared: boolean;
   delay: number;
+  repeats: boolean;
 }
 let capturedTimers: CapturedTimer[] = [];
 let activeTimers: Set<CapturedTimer> = new Set();
@@ -102,11 +106,77 @@ const React = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { JSDOM } = await import("jsdom");
 
+const hostSetTimeout = globalThis.setTimeout;
+const hostClearTimeout = globalThis.clearTimeout;
+const hostSetInterval = globalThis.setInterval;
+const hostClearInterval = globalThis.clearInterval;
+const POLL_DELAY_MS = 5_000;
+const overriddenGlobalKeys = [
+  "setTimeout",
+  "clearTimeout",
+  "setInterval",
+  "clearInterval",
+  "window",
+  "document",
+  "navigator",
+  "HTMLElement",
+  "localStorage",
+] as const;
+const originalGlobalDescriptors = new Map(
+  overriddenGlobalKeys.map((key) => [
+    key,
+    Object.getOwnPropertyDescriptor(globalThis, key),
+  ]),
+);
+let currentDom: InstanceType<typeof JSDOM> | null = null;
+const mountedRoots = new Set<ReturnType<typeof createRoot>>();
+
+function waitForHostTimer(delay = 0): Promise<void> {
+  return new Promise((resolve) => hostSetTimeout(resolve, delay));
+}
+
+async function waitForCondition(
+  condition: () => boolean,
+  description: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (condition()) return;
+    await waitForHostTimer(5);
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+}
+
+function captureTimer(
+  callback: () => void,
+  delay: number,
+  repeats: boolean,
+): CapturedTimer {
+  const timer: CapturedTimer = {
+    callback,
+    cleared: false,
+    delay,
+    repeats,
+  };
+  capturedTimers.push(timer);
+  activeTimers.add(timer);
+  return timer;
+}
+
+function clearCapturedTimer(id: unknown): boolean {
+  if (typeof id !== "object" || id === null) return false;
+  const timer = id as CapturedTimer;
+  if (!capturedTimers.includes(timer)) return false;
+  timer.cleared = true;
+  activeTimers.delete(timer);
+  return true;
+}
+
 function setupDom() {
   const dom = new JSDOM('<!DOCTYPE html><div id="root"></div>', {
     url: "http://localhost",
     pretendToBeVisual: true,
   });
+  currentDom = dom;
   const { window } = dom;
   const g = globalThis as unknown as Record<string, unknown>;
   g.window = window;
@@ -118,40 +188,56 @@ function setupDom() {
   // Override setInterval/setTimeout with controllable shims. Production
   // now schedules the 5-second poll via recursive setTimeout (single-flight
   // + generation token); legacy setInterval is kept for backwards compat.
-  g.setInterval = ((callback: () => void, delay: number) => {
-    const timer: CapturedTimer = { callback, cleared: false, delay };
-    capturedTimers.push(timer);
-    activeTimers.add(timer);
-    return timer as unknown as number;
+  g.setInterval = ((...args: Parameters<typeof setInterval>) => {
+    const [callback, delay, ...callbackArgs] = args;
+    if (delay === POLL_DELAY_MS && typeof callback === "function") {
+      return captureTimer(
+        () => callback(...callbackArgs),
+        delay,
+        true,
+      ) as unknown as ReturnType<typeof setInterval>;
+    }
+    return hostSetInterval(...args);
   }) as typeof setInterval;
-  g.clearInterval = ((id: number) => {
-    const timer = id as unknown as CapturedTimer;
-    timer.cleared = true;
-    activeTimers.delete(timer);
+  g.clearInterval = ((id: Parameters<typeof clearInterval>[0]) => {
+    if (!clearCapturedTimer(id)) hostClearInterval(id);
   }) as typeof clearInterval;
-  g.setTimeout = ((callback: () => void, delay: number) => {
-    const timer: CapturedTimer = { callback, cleared: false, delay };
-    capturedTimers.push(timer);
-    activeTimers.add(timer);
-    return timer as unknown as number;
-  }) as unknown as typeof setTimeout;
-  g.clearTimeout = ((id: number) => {
-    const timer = id as unknown as CapturedTimer;
-    timer.cleared = true;
-    activeTimers.delete(timer);
-  }) as unknown as typeof clearTimeout;
+  g.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    const [callback, delay, ...callbackArgs] = args;
+    if (delay === POLL_DELAY_MS && typeof callback === "function") {
+      return captureTimer(
+        () => callback(...callbackArgs),
+        delay,
+        false,
+      ) as unknown as ReturnType<typeof setTimeout>;
+    }
+    return hostSetTimeout(...args);
+  }) as typeof setTimeout;
+  g.clearTimeout = ((id: Parameters<typeof clearTimeout>[0]) => {
+    if (!clearCapturedTimer(id)) hostClearTimeout(id);
+  }) as typeof clearTimeout;
 
   return window as unknown as Window & typeof globalThis;
 }
 
-/** Fire all active (non-cleared) interval callbacks once. */
-async function tickIntervals() {
+/** Fire each active timer once, preserving interval vs one-shot semantics. */
+async function tickPollTimers() {
   const timers = [...activeTimers];
   for (const timer of timers) {
     if (!timer.cleared) {
+      if (!timer.repeats) {
+        timer.cleared = true;
+        activeTimers.delete(timer);
+      }
       await timer.callback();
     }
   }
+}
+
+function pollCallCount(): number {
+  return fetchCalls.filter(
+    (call) => call.url === "/api/eliza-app/onboarding/chat",
+  ).length;
 }
 
 interface ObservedState {
@@ -194,11 +280,19 @@ function mountHook(
   // Clear any previous render (container is a known empty div from setupDom)
   container.textContent = "";
   const root = createRoot(container);
+  mountedRoots.add(root);
   root.render(React.createElement(TestHarness));
+
+  let mounted = true;
 
   return {
     getState: () => state,
-    unmount: () => root.unmount(),
+    unmount: () => {
+      if (!mounted) return;
+      mounted = false;
+      mountedRoots.delete(root);
+      root.unmount();
+    },
   };
 }
 
@@ -211,11 +305,79 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     activeTimers = new Set();
   });
 
+  afterEach(async () => {
+    try {
+      for (const root of mountedRoots) root.unmount();
+      mountedRoots.clear();
+      await waitForHostTimer();
+      currentDom?.window.close();
+      currentDom = null;
+    } finally {
+      for (const key of overriddenGlobalKeys) {
+        const descriptor = originalGlobalDescriptors.get(key);
+        if (descriptor) {
+          Object.defineProperty(globalThis, key, descriptor);
+        } else {
+          Reflect.deleteProperty(globalThis, key);
+        }
+      }
+      // Restore every global before asserting so a single mismatch cannot
+      // strand the remaining test process on the fake scheduler.
+      for (const key of overriddenGlobalKeys) {
+        const descriptor = originalGlobalDescriptors.get(key);
+        expect(Object.getOwnPropertyDescriptor(globalThis, key)).toEqual(
+          descriptor,
+        );
+      }
+    }
+  });
+
+  test("the package isolates this module-mocking suite in a second Bun process", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"),
+    ) as { scripts?: { test?: string } };
+    const testScript = packageJson.scripts?.test;
+    expect(testScript).toBeDefined();
+    expect(
+      testScript?.split("tests/provisioning-poll-hook.test.ts"),
+    ).toHaveLength(2);
+    expect(testScript).toEndWith(
+      "&& bun test tests/provisioning-poll-hook.test.ts",
+    );
+  });
+
+  test("React settle waits use the host timer while the fake queue holds only poll timers", async () => {
+    await waitForHostTimer();
+    expect(capturedTimers).toHaveLength(0);
+
+    const { unmount } = mountHook(true, "platform:blooio:+123****7890");
+    await waitForCondition(
+      () => activeTimers.size > 0,
+      "the initial provisioning poll timer",
+    );
+
+    const queuedBeforeHostWait = capturedTimers.length;
+    await waitForHostTimer(10);
+    expect(capturedTimers).toHaveLength(queuedBeforeHostWait);
+    expect(capturedTimers.every((timer) => timer.delay === POLL_DELAY_MS)).toBe(
+      true,
+    );
+
+    unmount();
+  });
+
   test("immediate poll sends statusOnly:true with no message field", async () => {
     const { unmount } = mountHook(true, "platform:blooio:+123****7890");
 
     // Wait for the mount effect + immediate poll to fire.
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForCondition(
+      () =>
+        fetchCalls.some((call) => {
+          const body = call.body as Record<string, unknown> | undefined;
+          return body?.statusOnly === true;
+        }),
+      "the immediate status-only poll",
+    );
 
     const chatCalls = fetchCalls.filter(
       (c) => c.url === "/api/eliza-app/onboarding/chat",
@@ -249,7 +411,10 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     const { unmount } = mountHook(true, "platform:blooio:+123****7890");
 
     // Wait for mount + immediate poll.
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForCondition(
+      () => activeTimers.size > 0,
+      "the initial provisioning poll timer",
+    );
 
     const callsAfterImmediate = fetchCalls.filter(
       (c) => c.url === "/api/eliza-app/onboarding/chat",
@@ -261,10 +426,13 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     expect(pollTimer.delay).toBe(5000);
 
     // Fire the interval callback to simulate the 5-second tick.
-    await tickIntervals();
+    await tickPollTimers();
 
     // Allow the async fetch to resolve.
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForCondition(
+      () => pollCallCount() > callsAfterImmediate,
+      "the interval-triggered poll",
+    );
 
     const callsAfterInterval = fetchCalls.filter(
       (c) => c.url === "/api/eliza-app/onboarding/chat",
@@ -294,12 +462,19 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     );
 
     // Wait for mount + immediate poll.
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForCondition(
+      () => activeTimers.size > 0,
+      "the initial provisioning poll timer",
+    );
 
     // Fire multiple interval ticks to simulate several 5-second polls.
     for (let i = 0; i < 3; i++) {
-      await tickIntervals();
-      await new Promise((r) => setTimeout(r, 50));
+      const callsBeforeTick = pollCallCount();
+      await tickPollTimers();
+      await waitForCondition(
+        () => pollCallCount() > callsBeforeTick && activeTimers.size > 0,
+        `provisioning poll ${i + 1}`,
+      );
     }
 
     // The transcript visible to the UI must not contain duplicate assistant
@@ -322,14 +497,20 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     );
 
     // Wait for mount + immediate poll (status pending).
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForCondition(
+      () => activeTimers.size > 0,
+      "the initial provisioning poll timer",
+    );
 
     // Flip the mock so the next response is provisioning=running with a bridgeUrl.
     nextStatus = "running";
 
     // Fire the interval tick — the hook should see isReady and stop polling.
-    await tickIntervals();
-    await new Promise((r) => setTimeout(r, 100));
+    await tickPollTimers();
+    await waitForCondition(
+      () => getState().isReady,
+      "the provisioning ready state",
+    );
 
     // The hook must have transitioned to ready.
     expect(getState().isReady).toBe(true);
@@ -341,8 +522,8 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     ).length;
 
     // Even if we fire timers manually, cleared timers are skipped.
-    await tickIntervals();
-    await new Promise((r) => setTimeout(r, 50));
+    await tickPollTimers();
+    await waitForHostTimer();
 
     const callsAfterExtraTick = fetchCalls.filter(
       (c) => c.url === "/api/eliza-app/onboarding/chat",
@@ -358,7 +539,10 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     const { unmount } = mountHook(true, "platform:blooio:+123****7890");
 
     // Wait for mount + immediate poll.
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForCondition(
+      () => activeTimers.size > 0,
+      "the initial provisioning poll timer",
+    );
 
     const callsBefore = fetchCalls.filter(
       (c) => c.url === "/api/eliza-app/onboarding/chat",
@@ -374,8 +558,8 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     expect(activeAfterUnmount.length).toBe(0);
 
     // Fire interval ticks — since they are cleared, no calls should arrive.
-    await tickIntervals();
-    await new Promise((r) => setTimeout(r, 50));
+    await tickPollTimers();
+    await waitForHostTimer();
 
     const callsAfter = fetchCalls.filter(
       (c) => c.url === "/api/eliza-app/onboarding/chat",
@@ -392,7 +576,10 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
       "platform:blooio:+123****7890",
     );
 
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForCondition(
+      () => getState().provisioningError !== null,
+      "the terminal provisioning error",
+    );
 
     expect(getState().provisioningError).toContain("Provisioning failed");
 
@@ -401,8 +588,8 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     ).length;
 
     // Further interval ticks must not poll again after the terminal error.
-    await tickIntervals();
-    await new Promise((r) => setTimeout(r, 50));
+    await tickPollTimers();
+    await waitForHostTimer();
 
     const callsAfter = fetchCalls.filter(
       (c) => c.url === "/api/eliza-app/onboarding/chat",
@@ -418,7 +605,10 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
       "platform:blooio:+123****7890",
     );
 
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForCondition(
+      () => activeTimers.size > 0,
+      "the initial provisioning poll timer",
+    );
     expect(getState().provisioningError).toBeNull();
 
     const callsBefore = fetchCalls.filter(
@@ -429,8 +619,11 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     const realNow = Date.now;
     Date.now = () => realNow() + 5 * 60 * 1000 + 1_000;
     try {
-      await tickIntervals();
-      await new Promise((r) => setTimeout(r, 50));
+      await tickPollTimers();
+      await waitForCondition(
+        () => getState().provisioningError !== null,
+        "the provisioning deadline error",
+      );
     } finally {
       Date.now = realNow;
     }
@@ -444,8 +637,8 @@ describe("useElizaAppProvisioningChat — shared onboarding poll", () => {
     ).length;
     expect(callsAfterDeadline).toBe(callsBefore);
 
-    await tickIntervals();
-    await new Promise((r) => setTimeout(r, 50));
+    await tickPollTimers();
+    await waitForHostTimer();
     const callsAfterExtraTick = fetchCalls.filter(
       (c) => c.url === "/api/eliza-app/onboarding/chat",
     ).length;
