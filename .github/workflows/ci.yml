@@ -29,6 +29,13 @@ env:
   NODE_OPTIONS: "--max-old-space-size=8192"
 
 jobs:
+  develop_pr:
+    name: Develop PR compatibility gate
+    if: github.event_name == 'pull_request' && github.base_ref == 'develop'
+    uses: ./.github/workflows/develop-pr.yml
+    permissions:
+      contents: read
+
   changes:
     name: Classify changes
     runs-on: ubuntu-24.04
@@ -557,6 +564,7 @@ jobs:
     if: always()
     needs:
       [
+        develop_pr,
         changes,
         quality,
         tests,
@@ -572,7 +580,10 @@ jobs:
     steps:
       - name: Require every CI job to succeed
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
           RESULTS: >-
+            develop-pr=${{ needs.develop_pr.result }}
             changes=${{ needs.changes.result }}
             quality=${{ needs.quality.result }}
             tests-scripts=${{ needs.tests.result }}
@@ -586,7 +597,16 @@ jobs:
         run: |
           set -euo pipefail
           for pair in $RESULTS; do
+            name="${pair%%=*}"
             result="${pair#*=}"
+            if [ "$name" = "develop-pr" ] &&
+               { [ "$EVENT_NAME" != "pull_request" ] || [ "$BASE_REF" != "develop" ]; }; then
+              if [ "$result" != "skipped" ]; then
+                echo "::error::$pair (expected skipped outside a develop pull request)"
+                exit 1
+              fi
+              continue
+            fi
             if [ "$result" != "success" ]; then
               echo "::error::$pair"
               exit 1
